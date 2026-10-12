@@ -7,6 +7,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import Link from "next/link";
 
@@ -72,7 +73,17 @@ function Icon({
   name,
   size = 20,
 }: {
-  name: "spark" | "plus" | "arrow" | "paperclip" | "book" | "panel" | "check";
+  name:
+    | "spark"
+    | "plus"
+    | "arrow"
+    | "paperclip"
+    | "book"
+    | "panel"
+    | "check"
+    | "moon"
+    | "sun"
+    | "stop";
   size?: number;
 }) {
   const common = {
@@ -133,11 +144,47 @@ function Icon({
           <path d="m5 12 4 4L19 6" />
         </svg>
       );
+    case "moon":
+      return (
+        <svg {...common}>
+          <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z" />
+        </svg>
+      );
+    case "sun":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" />
+        </svg>
+      );
+    case "stop":
+      return (
+        <svg {...common}>
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
+      );
   }
 }
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+function subscribeToTheme(onStoreChange: () => void) {
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener("knowly-theme-change", onStoreChange);
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener("knowly-theme-change", onStoreChange);
+  };
+}
+
+function getThemeSnapshot() {
+  return window.localStorage.getItem("knowly-theme") === "dark";
+}
+
+function getServerThemeSnapshot() {
+  return false;
 }
 
 export default function Home() {
@@ -150,9 +197,33 @@ export default function Home() {
   const [uploadNotice, setUploadNotice] = useState("");
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const darkMode = useSyncExternalStore(
+    subscribeToTheme,
+    getThemeSnapshot,
+    getServerThemeSnapshot,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = darkMode ? "dark" : "light";
+  }, [darkMode]);
+
+  useEffect(() => {
+    if (!isSending) return;
+
+    function stopOnEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        chatAbortControllerRef.current?.abort();
+      }
+    }
+
+    document.addEventListener("keydown", stopOnEscape);
+    return () => document.removeEventListener("keydown", stopOnEscape);
+  }, [isSending]);
 
   useEffect(() => {
     let active = true;
@@ -196,12 +267,15 @@ export default function Home() {
     setError("");
     setUploadNotice("");
     setIsSending(true);
+    const abortController = new AbortController();
+    chatAbortControllerRef.current = abortController;
 
     try {
       const response = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: text, topK }),
+        signal: abortController.signal,
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
@@ -228,9 +302,14 @@ export default function Home() {
         },
       ]);
     } catch (requestError) {
-      setError(getErrorMessage(requestError));
+      if (!(requestError instanceof Error && requestError.name === "AbortError")) {
+        setError(getErrorMessage(requestError));
+      }
     } finally {
-      setIsSending(false);
+      if (chatAbortControllerRef.current === abortController) {
+        chatAbortControllerRef.current = null;
+        setIsSending(false);
+      }
       textareaRef.current?.focus();
     }
   }
@@ -277,6 +356,7 @@ export default function Home() {
   }
 
   function startNewChat() {
+    chatAbortControllerRef.current?.abort();
     setMessages([]);
     setError("");
     setUploadNotice("");
@@ -389,6 +469,21 @@ export default function Home() {
                   ? "Local AI ready"
                   : "API offline"}
             </span>
+            <button
+              className="icon-button theme-toggle"
+              type="button"
+              onClick={() => {
+                window.localStorage.setItem(
+                  "knowly-theme",
+                  darkMode ? "light" : "dark",
+                );
+                window.dispatchEvent(new Event("knowly-theme-change"));
+              }}
+              aria-label={`Switch to ${darkMode ? "light" : "dark"} mode`}
+              title={`Switch to ${darkMode ? "light" : "dark"} mode`}
+            >
+              <Icon name={darkMode ? "sun" : "moon"} size={17} />
+            </button>
             <button
               className="topbar-upload"
               type="button"
@@ -599,17 +694,36 @@ export default function Home() {
                 </label>
               </div>
               <div className="composer-right">
-                <span className="keyboard-hint">
-                  <kbd>↵</kbd> to send
-                </span>
-                <button
-                  className="send-button"
-                  type="submit"
-                  disabled={!question.trim() || isSending}
-                  aria-label="Send message"
-                >
-                  <Icon name="arrow" size={18} />
-                </button>
+                {isSending ? (
+                  <>
+                    <span className="keyboard-hint">
+                      <kbd>Esc</kbd> to stop
+                    </span>
+                    <button
+                      className="stop-button"
+                      type="button"
+                      onClick={() => chatAbortControllerRef.current?.abort()}
+                      aria-label="Stop response"
+                      title="Stop response (Esc)"
+                    >
+                      <Icon name="stop" size={16} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="keyboard-hint">
+                      <kbd>↵</kbd> to send
+                    </span>
+                    <button
+                      className="send-button"
+                      type="submit"
+                      disabled={!question.trim()}
+                      aria-label="Send message"
+                    >
+                      <Icon name="arrow" size={18} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </form>
